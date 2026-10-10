@@ -1,6 +1,7 @@
 
 using System;
 using System.Drawing;
+using System.Drawing.Imaging;
 using System.Windows.Forms;
 
 namespace RotemExcel;
@@ -11,61 +12,184 @@ internal static class Program
     private static void Main()
     {
         ApplicationConfiguration.Initialize();
+        Application.Run(new MainForm());
+    }
+}
 
-        var form = new Form
-        {
-            Text = "RotemExcel",
-            StartPosition = FormStartPosition.CenterScreen,
-            Size = new Size(520, 300),
-            MinimumSize = new Size(520, 300)
-        };
+internal sealed class MainForm : Form
+{
+    private readonly PictureBox preview = new();
+    private readonly Label status = new();
 
-        var title = new Label
+    public MainForm()
+    {
+        Text = "RotemExcel - захват данных";
+        StartPosition = FormStartPosition.CenterScreen;
+        Width = 850;
+        Height = 600;
+
+        var top = new FlowLayoutPanel
         {
-            Text = "RotemExcel — учет потребления птицы",
             Dock = DockStyle.Top,
-            Height = 55,
-            TextAlign = ContentAlignment.MiddleCenter,
-            Font = new Font("Segoe UI", 13, FontStyle.Bold)
+            Height = 85,
+            Padding = new Padding(10)
         };
 
-        var status = new Label
+        var capture = new Button
         {
-            Text = "Программа запущена. Считывание пока не настроено.",
-            Dock = DockStyle.Top,
-            Height = 55,
-            TextAlign = ContentAlignment.MiddleCenter
+            Text = "Выбрать область экрана",
+            AutoSize = true,
+            Height = 35
         };
 
-        var button = new Button
+        capture.Click += (_, _) => CaptureArea();
+
+        status.Text = "Выбери область со строками воды и корма.";
+        status.AutoSize = true;
+        status.Padding = new Padding(10);
+
+        top.Controls.Add(capture);
+        top.Controls.Add(status);
+
+        preview.Dock = DockStyle.Fill;
+        preview.SizeMode = PictureBoxSizeMode.Zoom;
+        preview.BorderStyle = BorderStyle.FixedSingle;
+
+        Controls.Add(preview);
+        Controls.Add(top);
+    }
+
+    private void CaptureArea()
+    {
+        using var selector = new SelectionForm();
+
+        if (selector.ShowDialog(this) != DialogResult.OK ||
+            selector.SelectedBounds.Width < 2 ||
+            selector.SelectedBounds.Height < 2)
         {
-            Text = "Проверить запуск",
-            Width = 200,
-            Height = 40,
-            Anchor = AnchorStyles.None
-        };
+            status.Text = "Захват отменён.";
+            return;
+        }
 
-        button.Click += (_, _) =>
+        var area = selector.SelectedBounds;
+        var bitmap = new Bitmap(area.Width, area.Height);
+
+        using (var graphics = Graphics.FromImage(bitmap))
         {
-            status.Text = "Программа работает. Готова к настройке считывания.";
-        };
+            graphics.CopyFromScreen(
+                area.Left,
+                area.Top,
+                0,
+                0,
+                area.Size,
+                CopyPixelOperation.SourceCopy);
+        }
 
-        var panel = new Panel
+        var old = preview.Image;
+        preview.Image = bitmap;
+        old?.Dispose();
+
+        status.Text =
+            $"Область: X={area.X}, Y={area.Y}, " +
+            $"ширина={area.Width}, высота={area.Height}";
+    }
+}
+
+internal sealed class SelectionForm : Form
+{
+    private Point start;
+    private Point finish;
+    private bool dragging;
+
+    public Rectangle SelectedBounds { get; private set; }
+
+    public SelectionForm()
+    {
+        FormBorderStyle = FormBorderStyle.None;
+        StartPosition = FormStartPosition.Manual;
+        Bounds = SystemInformation.VirtualScreen;
+        TopMost = true;
+        ShowInTaskbar = false;
+        DoubleBuffered = true;
+        Cursor = Cursors.Cross;
+        BackColor = Color.Black;
+        Opacity = 0.30;
+        KeyPreview = true;
+
+        MouseDown += OnMouseDown;
+        MouseMove += OnMouseMove;
+        MouseUp += OnMouseUp;
+
+        KeyDown += (_, e) =>
         {
-            Dock = DockStyle.Fill
+            if (e.KeyCode == Keys.Escape)
+            {
+                DialogResult = DialogResult.Cancel;
+                Close();
+            }
         };
+    }
 
-        panel.Controls.Add(button);
-        panel.Resize += (_, _) =>
-        {
-            button.Left = (panel.ClientSize.Width - button.Width) / 2;
-            button.Top = (panel.ClientSize.Height - button.Height) / 2;
-        };
+    private void OnMouseDown(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left)
+            return;
 
-        form.Controls.Add(panel);
-        form.Controls.Add(status);
-        form.Controls.Add(title);
+        start = e.Location;
+        finish = e.Location;
+        dragging = true;
+        Invalidate();
+    }
 
-        Application.Run(form);
+    private void OnMouseMove(object? sender, MouseEventArgs e)
+    {
+        if (!dragging)
+            return;
+
+        finish = e.Location;
+        Invalidate();
+    }
+
+    private void OnMouseUp(object? sender, MouseEventArgs e)
+    {
+        if (!dragging || e.Button != MouseButtons.Left)
+            return;
+
+        finish = e.Location;
+        dragging = false;
+
+        int left = Math.Min(start.X, finish.X);
+        int top = Math.Min(start.Y, finish.Y);
+        int width = Math.Abs(finish.X - start.X);
+        int height = Math.Abs(finish.Y - start.Y);
+
+        SelectedBounds = new Rectangle(
+            left + Bounds.Left,
+            top + Bounds.Top,
+            width,
+            height);
+
+        if (width > 1 && height > 1)
+            DialogResult = DialogResult.OK;
+        else
+            DialogResult = DialogResult.Cancel;
+
+        Close();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+
+        if (!dragging)
+            return;
+
+        int left = Math.Min(start.X, finish.X);
+        int top = Math.Min(start.Y, finish.Y);
+        int width = Math.Abs(finish.X - start.X);
+        int height = Math.Abs(finish.Y - start.Y);
+
+        using var pen = new Pen(Color.Lime, 3);
+        e.Graphics.DrawRectangle(pen, left, top, width, height);
     }
 }
