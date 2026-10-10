@@ -1,8 +1,8 @@
 
 using System;
 using System.Drawing;
-using System.Drawing.Imaging;
 using System.Windows.Forms;
+using Tesseract;
 
 namespace RotemExcel;
 
@@ -20,78 +20,143 @@ internal sealed class MainForm : Form
 {
     private readonly PictureBox preview = new();
     private readonly Label status = new();
+    private readonly TextBox result = new();
+    private Bitmap? capturedImage;
 
     public MainForm()
     {
-        Text = "RotemExcel - захват данных";
+        Text = "RotemExcel - распознавание Rotem";
         StartPosition = FormStartPosition.CenterScreen;
-        Width = 850;
-        Height = 600;
+        Width = 900;
+        Height = 700;
 
-        var top = new FlowLayoutPanel
+        var toolbar = new FlowLayoutPanel
         {
             Dock = DockStyle.Top,
-            Height = 85,
-            Padding = new Padding(10)
+            Height = 48,
+            Padding = new Padding(5)
         };
 
-        var capture = new Button
+        var captureButton = new Button
         {
             Text = "Выбрать область экрана",
-            AutoSize = true,
-            Height = 35
+            AutoSize = true
         };
+        captureButton.Click += (_, _) => CaptureArea();
 
-        capture.Click += (_, _) => CaptureArea();
+        var ocrButton = new Button
+        {
+            Text = "Распознать цифры",
+            AutoSize = true
+        };
+        ocrButton.Click += (_, _) => RecognizeNumbers();
 
-        status.Text = "Выбери область со строками воды и корма.";
-        status.AutoSize = true;
-        status.Padding = new Padding(10);
+        toolbar.Controls.Add(captureButton);
+        toolbar.Controls.Add(ocrButton);
 
-        top.Controls.Add(capture);
-        top.Controls.Add(status);
+        status.Text = "1. Выбери область. 2. Нажми «Распознать цифры».";
+        status.Dock = DockStyle.Top;
+        status.Height = 35;
+        status.TextAlign = ContentAlignment.MiddleLeft;
 
         preview.Dock = DockStyle.Fill;
         preview.SizeMode = PictureBoxSizeMode.Zoom;
         preview.BorderStyle = BorderStyle.FixedSingle;
 
+        result.Dock = DockStyle.Bottom;
+        result.Height = 115;
+        result.Multiline = true;
+        result.ReadOnly = true;
+        result.ScrollBars = ScrollBars.Vertical;
+        result.Font = new Font("Consolas", 12);
+
         Controls.Add(preview);
-        Controls.Add(top);
+        Controls.Add(result);
+        Controls.Add(status);
+        Controls.Add(toolbar);
     }
 
     private void CaptureArea()
     {
         using var selector = new SelectionForm();
 
-        if (selector.ShowDialog(this) != DialogResult.OK ||
-            selector.SelectedBounds.Width < 2 ||
-            selector.SelectedBounds.Height < 2)
-        {
-            status.Text = "Захват отменён.";
+        if (selector.ShowDialog(this) != DialogResult.OK)
             return;
-        }
 
         var area = selector.SelectedBounds;
+        if (area.Width < 2 || area.Height < 2)
+            return;
+
         var bitmap = new Bitmap(area.Width, area.Height);
 
         using (var graphics = Graphics.FromImage(bitmap))
         {
             graphics.CopyFromScreen(
-                area.Left,
-                area.Top,
-                0,
-                0,
-                area.Size,
+                area.Left, area.Top, 0, 0, area.Size,
                 CopyPixelOperation.SourceCopy);
         }
 
-        var old = preview.Image;
-        preview.Image = bitmap;
+        var old = capturedImage;
+        capturedImage = bitmap;
+        preview.Image = capturedImage;
         old?.Dispose();
 
-        status.Text =
-            $"Область: X={area.X}, Y={area.Y}, " +
-            $"ширина={area.Width}, высота={area.Height}";
+        result.Clear();
+        status.Text = $"Снимок получен: {area.Width} × {area.Height}";
+    }
+
+    private void RecognizeNumbers()
+    {
+        if (capturedImage is null)
+        {
+            MessageBox.Show(
+                this,
+                "Сначала выбери область экрана.",
+                "RotemExcel",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            return;
+        }
+
+        try
+        {
+            status.Text = "Распознавание...";
+            result.Clear();
+            Application.DoEvents();
+
+            string dataPath = System.IO.Path.Combine(
+                AppContext.BaseDirectory, "tessdata");
+
+            using var engine = new TesseractEngine(
+                dataPath, "eng", EngineMode.Default);
+
+            engine.SetVariable(
+                "tessedit_char_whitelist",
+                "0123456789.,-");
+
+            using var pix = PixConverter.ToPix(capturedImage);
+            using var page = engine.Process(pix, PageSegMode.Auto);
+
+            string text = page.GetText();
+
+            result.Text = string.IsNullOrWhiteSpace(text)
+                ? "Цифры не распознаны. Попробуй выделить область крупнее."
+                : text.Trim();
+
+            status.Text = "Распознавание завершено. Проверь результат.";
+        }
+        catch (Exception ex)
+        {
+            status.Text = "Не удалось выполнить распознавание.";
+            result.Text = ex.ToString();
+        }
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        preview.Image = null;
+        capturedImage?.Dispose();
+        base.OnFormClosed(e);
     }
 }
 
@@ -116,65 +181,59 @@ internal sealed class SelectionForm : Form
         Opacity = 0.30;
         KeyPreview = true;
 
-        MouseDown += OnMouseDown;
-        MouseMove += OnMouseMove;
-        MouseUp += OnMouseUp;
+        MouseDown += (_, e) =>
+        {
+            if (e.Button != MouseButtons.Left)
+                return;
+
+            start = e.Location;
+            finish = e.Location;
+            dragging = true;
+            Invalidate();
+        };
+
+        MouseMove += (_, e) =>
+        {
+            if (!dragging)
+                return;
+
+            finish = e.Location;
+            Invalidate();
+        };
+
+        MouseUp += (_, e) =>
+        {
+            if (!dragging || e.Button != MouseButtons.Left)
+                return;
+
+            finish = e.Location;
+            dragging = false;
+
+            int left = Math.Min(start.X, finish.X);
+            int top = Math.Min(start.Y, finish.Y);
+
+            SelectedBounds = new Rectangle(
+                left + Bounds.Left,
+                top + Bounds.Top,
+                Math.Abs(finish.X - start.X),
+                Math.Abs(finish.Y - start.Y));
+
+            DialogResult = SelectedBounds.Width > 1 &&
+                           SelectedBounds.Height > 1
+                ? DialogResult.OK
+                : DialogResult.Cancel;
+
+            Close();
+        };
 
         KeyDown += (_, e) =>
         {
-            if (e.KeyCode == Keys.Escape)
-            {
-                DialogResult = DialogResult.Cancel;
-                Close();
-            }
-        };
-    }
+            if (e.KeyCode != Keys.Escape)
+                return;
 
-    private void OnMouseDown(object? sender, MouseEventArgs e)
-    {
-        if (e.Button != MouseButtons.Left)
-            return;
-
-        start = e.Location;
-        finish = e.Location;
-        dragging = true;
-        Invalidate();
-    }
-
-    private void OnMouseMove(object? sender, MouseEventArgs e)
-    {
-        if (!dragging)
-            return;
-
-        finish = e.Location;
-        Invalidate();
-    }
-
-    private void OnMouseUp(object? sender, MouseEventArgs e)
-    {
-        if (!dragging || e.Button != MouseButtons.Left)
-            return;
-
-        finish = e.Location;
-        dragging = false;
-
-        int left = Math.Min(start.X, finish.X);
-        int top = Math.Min(start.Y, finish.Y);
-        int width = Math.Abs(finish.X - start.X);
-        int height = Math.Abs(finish.Y - start.Y);
-
-        SelectedBounds = new Rectangle(
-            left + Bounds.Left,
-            top + Bounds.Top,
-            width,
-            height);
-
-        if (width > 1 && height > 1)
-            DialogResult = DialogResult.OK;
-        else
             DialogResult = DialogResult.Cancel;
-
-        Close();
+            Close();
+        };
     }
 
     protected override void OnPaint(PaintEventArgs e)
