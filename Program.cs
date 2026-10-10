@@ -1,8 +1,7 @@
-
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Windows.Forms;
-using Tesseract;
 
 namespace RotemExcel;
 
@@ -18,145 +17,108 @@ internal static class Program
 
 internal sealed class MainForm : Form
 {
-    private readonly PictureBox preview = new();
-    private readonly Label status = new();
-    private readonly TextBox result = new();
-    private Bitmap? capturedImage;
+    private readonly AreasConfig areas = AreasConfig.Load();
+    private readonly Label areasStatus = new();
 
     public MainForm()
     {
-        Text = "RotemExcel - распознавание Rotem";
+        Text = "RotemExcel — калибровка областей";
         StartPosition = FormStartPosition.CenterScreen;
-        Width = 900;
-        Height = 700;
+        Width = 700;
+        Height = 400;
 
-        var toolbar = new FlowLayoutPanel
+        var panel = new FlowLayoutPanel
         {
             Dock = DockStyle.Top,
-            Height = 48,
-            Padding = new Padding(5)
+            Height = 200,
+            Padding = new Padding(10),
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            AutoScroll = true
         };
 
-        var captureButton = new Button
-        {
-            Text = "Выбрать область экрана",
-            AutoSize = true
-        };
-        captureButton.Click += (_, _) => CaptureArea();
+        panel.Controls.Add(MakeButton("Область: вода Н-1", "water_h1"));
+        panel.Controls.Add(MakeButton("Область: корм Н-1", "feed_h1"));
+        panel.Controls.Add(MakeButton("Область: вода Н-2", "water_h2"));
+        panel.Controls.Add(MakeButton("Область: корм Н-2", "feed_h2"));
 
-        var ocrButton = new Button
-        {
-            Text = "Распознать цифры",
-            AutoSize = true
-        };
-        ocrButton.Click += (_, _) => RecognizeNumbers();
+        areasStatus.Dock = DockStyle.Fill;
+        areasStatus.Padding = new Padding(15);
+        areasStatus.Font = new Font("Consolas", 11);
+        areasStatus.TextAlign = ContentAlignment.TopLeft;
 
-        toolbar.Controls.Add(captureButton);
-        toolbar.Controls.Add(ocrButton);
+        Controls.Add(areasStatus);
+        Controls.Add(panel);
 
-        status.Text = "1. Выбери область. 2. Нажми «Распознать цифры».";
-        status.Dock = DockStyle.Top;
-        status.Height = 35;
-        status.TextAlign = ContentAlignment.MiddleLeft;
-
-        preview.Dock = DockStyle.Fill;
-        preview.SizeMode = PictureBoxSizeMode.Zoom;
-        preview.BorderStyle = BorderStyle.FixedSingle;
-
-        result.Dock = DockStyle.Bottom;
-        result.Height = 115;
-        result.Multiline = true;
-        result.ReadOnly = true;
-        result.ScrollBars = ScrollBars.Vertical;
-        result.Font = new Font("Consolas", 12);
-
-        Controls.Add(preview);
-        Controls.Add(result);
-        Controls.Add(status);
-        Controls.Add(toolbar);
+        RefreshStatus();
     }
 
-    private void CaptureArea()
+    private Button MakeButton(string text, string key)
+    {
+        var btn = new Button
+        {
+            Text = text,
+            AutoSize = true,
+            Margin = new Padding(0, 0, 0, 8)
+        };
+        btn.Click += (_, _) => PickArea(key);
+        return btn;
+    }
+
+    private void PickArea(string key)
     {
         using var selector = new SelectionForm();
 
         if (selector.ShowDialog(this) != DialogResult.OK)
             return;
 
-        var area = selector.SelectedBounds;
-        if (area.Width < 2 || area.Height < 2)
+        var r = selector.SelectedBounds;
+
+        if (r.Width < 2 || r.Height < 2)
             return;
 
-        var bitmap = new Bitmap(area.Width, area.Height);
-
-        using (var graphics = Graphics.FromImage(bitmap))
+        areas.Set(key, new AreaRect
         {
-            graphics.CopyFromScreen(
-                area.Left, area.Top, 0, 0, area.Size,
-                CopyPixelOperation.SourceCopy);
-        }
+            X = r.X,
+            Y = r.Y,
+            Width = r.Width,
+            Height = r.Height
+        });
 
-        var old = capturedImage;
-        capturedImage = bitmap;
-        preview.Image = capturedImage;
-        old?.Dispose();
-
-        result.Clear();
-        status.Text = $"Снимок получен: {area.Width} × {area.Height}";
+        areas.Save();
+        RefreshStatus();
     }
 
-    private void RecognizeNumbers()
+    private void RefreshStatus()
     {
-        if (capturedImage is null)
+        var lines = new List<string>
         {
-            MessageBox.Show(
-                this,
-                "Сначала выбери область экрана.",
-                "RotemExcel",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information);
-            return;
+            "Сохранённые области (areas.json):",
+            ""
+        };
+
+        foreach (var key in new[] { "water_h1", "feed_h1", "water_h2", "feed_h2" })
+        {
+            var r = areas.Get(key);
+            string name = key switch
+            {
+                "water_h1" => "вода Н-1",
+                "feed_h1"  => "корм Н-1",
+                "water_h2" => "вода Н-2",
+                "feed_h2"  => "корм Н-2",
+                _ => key
+            };
+
+            lines.Add(r.IsSet
+                ? $"{name}: {r}"
+                : $"{name}: (не задана)");
         }
 
-        try
-        {
-            status.Text = "Распознавание...";
-            result.Clear();
-            Application.DoEvents();
+        lines.Add("");
+        lines.Add("Нажми кнопку — выдели мышкой область на экране.");
+        lines.Add("Esc — отменить выделение.");
 
-            string dataPath = System.IO.Path.Combine(
-                AppContext.BaseDirectory, "tessdata");
-
-            using var engine = new TesseractEngine(
-                dataPath, "eng", EngineMode.Default);
-
-            engine.SetVariable(
-                "tessedit_char_whitelist",
-                "0123456789.,-");
-
-            using var pix = PixConverter.ToPix(capturedImage);
-            using var page = engine.Process(pix, PageSegMode.Auto);
-
-            string text = page.GetText();
-
-            result.Text = string.IsNullOrWhiteSpace(text)
-                ? "Цифры не распознаны. Попробуй выделить область крупнее."
-                : text.Trim();
-
-            status.Text = "Распознавание завершено. Проверь результат.";
-        }
-        catch (Exception ex)
-        {
-            status.Text = "Не удалось выполнить распознавание.";
-            result.Text = ex.ToString();
-        }
-    }
-
-    protected override void OnFormClosed(FormClosedEventArgs e)
-    {
-        preview.Image = null;
-        capturedImage?.Dispose();
-        base.OnFormClosed(e);
+        areasStatus.Text = string.Join(Environment.NewLine, lines);
     }
 }
 
