@@ -1,7 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.IO;
+using System.Text;
 using System.Windows.Forms;
+using Tesseract;
 
 namespace RotemExcel;
 
@@ -19,18 +22,19 @@ internal sealed class MainForm : Form
 {
     private readonly AreasConfig areas = AreasConfig.Load();
     private readonly Label areasStatus = new();
+    private readonly TextBox ocrResult = new();
 
     public MainForm()
     {
-        Text = "RotemExcel — калибровка областей";
+        Text = "RotemExcel — калибровка и OCR";
         StartPosition = FormStartPosition.CenterScreen;
-        Width = 700;
-        Height = 400;
+        Width = 900;
+        Height = 650;
 
         var panel = new FlowLayoutPanel
         {
             Dock = DockStyle.Top,
-            Height = 200,
+            Height = 260,
             Padding = new Padding(10),
             FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
@@ -42,11 +46,30 @@ internal sealed class MainForm : Form
         panel.Controls.Add(MakeButton("Область: вода Н-2", "water_h2"));
         panel.Controls.Add(MakeButton("Область: корм Н-2", "feed_h2"));
 
-        areasStatus.Dock = DockStyle.Fill;
-        areasStatus.Padding = new Padding(15);
-        areasStatus.Font = new Font("Consolas", 11);
-        areasStatus.TextAlign = ContentAlignment.TopLeft;
+        var recognizeBtn = new Button
+        {
+            Text = "Распознать всё",
+            AutoSize = true,
+            Margin = new Padding(0, 15, 0, 0),
+            Font = new Font("Segoe UI", 11, FontStyle.Bold)
+        };
+        recognizeBtn.Click += (_, _) => RecognizeAll();
+        panel.Controls.Add(recognizeBtn);
 
+        areasStatus.Dock = DockStyle.Top;
+        areasStatus.Height = 150;
+        areasStatus.Padding = new Padding(15);
+        areasStatus.Font = new Font("Consolas", 10);
+        areasStatus.TextAlign = ContentAlignment.TopLeft;
+        areasStatus.BorderStyle = BorderStyle.FixedSingle;
+
+        ocrResult.Dock = DockStyle.Fill;
+        ocrResult.Multiline = true;
+        ocrResult.ReadOnly = true;
+        ocrResult.ScrollBars = ScrollBars.Vertical;
+        ocrResult.Font = new Font("Consolas", 12);
+
+        Controls.Add(ocrResult);
         Controls.Add(areasStatus);
         Controls.Add(panel);
 
@@ -59,7 +82,7 @@ internal sealed class MainForm : Form
         {
             Text = text,
             AutoSize = true,
-            Margin = new Padding(0, 0, 0, 8)
+            Margin = new Padding(0, 0, 0, 6)
         };
         btn.Click += (_, _) => PickArea(key);
         return btn;
@@ -114,11 +137,95 @@ internal sealed class MainForm : Form
                 : $"{name}: (не задана)");
         }
 
-        lines.Add("");
-        lines.Add("Нажми кнопку — выдели мышкой область на экране.");
-        lines.Add("Esc — отменить выделение.");
-
         areasStatus.Text = string.Join(Environment.NewLine, lines);
+    }
+
+    private void RecognizeAll()
+    {
+        var sb = new StringBuilder();
+
+        foreach (var key in new[] { "water_h1", "feed_h1", "water_h2", "feed_h2" })
+        {
+            string name = key switch
+            {
+                "water_h1" => "вода Н-1",
+                "feed_h1"  => "корм Н-1",
+                "water_h2" => "вода Н-2",
+                "feed_h2"  => "корм Н-2",
+                _ => key
+            };
+
+            var r = areas.Get(key);
+
+            if (!r.IsSet)
+            {
+                sb.AppendLine($"{name}: (область не задана)");
+                continue;
+            }
+
+            try
+            {
+                using var bmp = CaptureArea(r);
+                string text = RunOcr(bmp);
+                sb.AppendLine($"{name}: {text}");
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine($"{name}: ОШИБКА — {ex.Message}");
+            }
+        }
+
+        ocrResult.Text = sb.ToString();
+    }
+
+    private static Bitmap CaptureArea(AreaRect r)
+    {
+        var bmp = new Bitmap(r.Width, r.Height);
+        using var g = Graphics.FromImage(bmp);
+        g.CopyFromScreen(r.X, r.Y, 0, 0, new Size(r.Width, r.Height),
+            CopyPixelOperation.SourceCopy);
+        return bmp;
+    }
+
+    private static string RunOcr(Bitmap bmp)
+    {
+        string dataPath = Path.Combine(AppContext.BaseDirectory, "tessdata");
+
+        using var engine = new TesseractEngine(dataPath, "eng", EngineMode.Default);
+        engine.SetVariable("tessedit_char_whitelist", "0123456789,.");
+
+        using var pix = PixConverter.ToPix(bmp);
+        using var page = engine.Process(pix, PageSegMode.SingleLine);
+
+        string raw = page.GetText();
+        raw = raw.Replace("\r", " ").Replace("\n", " ").Trim();
+
+        // Убираем запятую и всё после неё: "2450,0" -> "2450"
+        var sb = new StringBuilder();
+        bool skip = false;
+
+        foreach (char c in raw)
+        {
+            if (c == ',' || c == '.')
+            {
+                skip = true;
+                continue;
+            }
+
+            if (skip)
+            {
+                if (c == ' ')
+                {
+                    skip = false;
+                    sb.Append(' ');
+                }
+                continue;
+            }
+
+            sb.Append(c);
+        }
+
+        return sb.ToString().Trim();
     }
 }
 
