@@ -23,20 +23,30 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Publish Windows EXE
+      - name: Restore packages
+        run: dotnet restore RotemExcel.csproj
+
+      - name: Publish application
         run: >-
           dotnet publish RotemExcel.csproj
           -c Release
           -r win-x64
           --self-contained true
-          -p:PublishSingleFile=true
-          -p:EnableCompressionInSingleFile=true
+          -p:PublishSingleFile=false
           -o publish
 
-      - name: Upload EXE
+      - name: Download OCR language data
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force publish/tessdata
+          Invoke-WebRequest `
+            -Uri "https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata" `
+            -OutFile "publish/tessdata/eng.traineddata"
+
+      - name: Upload application folder
         uses: actions/upload-artifact@v4
         with:
           name: RotemExcel-Windows-x64
-          path: publish/RotemExcel.exe
+          path: publish/
           if-no-files-found: error
           retention-days: 14
