@@ -23,22 +23,29 @@ jobs:
       - name: Publish
         run: dotnet publish -c Release -r win-x64 --self-contained true -o publish
 
-      - name: Clean tessdata (keep only eng)
+      - name: Clean publish folder
         shell: pwsh
         run: |
-          $tess = "publish\tessdata"
-          if (Test-Path $tess) {
-            Get-ChildItem $tess -Recurse | Where-Object { $_.Name -ne "eng.traineddata" } | Remove-Item -Recurse -Force
-          }
-
-      - name: Remove extra language folders in publish
-        shell: pwsh
-        run: |
+          # Удаляем все лишние языковые папки, которые Tesseract тянет при сборке
           $langs = @("cs","de","es","fr","it","ja","ko","pl","pt-BR","ru","tr","zh-Hans","zh-Hant")
           foreach ($l in $langs) {
             $p = "publish\$l"
             if (Test-Path $p) { Remove-Item $p -Recurse -Force }
           }
+
+          # Полностью пересоздаём tessdata только с одним файлом
+          $tess = "publish\tessdata"
+          if (Test-Path $tess) { Remove-Item $tess -Recurse -Force }
+          New-Item -ItemType Directory -Path $tess | Out-Null
+
+          # Скачиваем eng.traineddata
+          $url = "https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata"
+          Write-Host "Downloading $url ..."
+          Invoke-WebRequest -Uri $url -OutFile "$tess\eng.traineddata"
+
+          # Проверяем, что файл на месте
+          Write-Host "Contents of publish\tessdata:"
+          Get-ChildItem $tess | Format-Table Name, Length
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
