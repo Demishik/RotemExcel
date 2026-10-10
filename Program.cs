@@ -35,7 +35,7 @@ internal sealed class MainForm : Form
         var panel = new FlowLayoutPanel
         {
             Dock = DockStyle.Top,
-            Height = 260,
+            Height = 320,
             Padding = new Padding(10),
             FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
@@ -56,6 +56,16 @@ internal sealed class MainForm : Form
         };
         recognizeBtn.Click += (_, _) => RecognizeAll();
         panel.Controls.Add(recognizeBtn);
+
+        var showAreasBtn = new Button
+        {
+            Text = "Показать области",
+            AutoSize = true,
+            Margin = new Padding(0, 6, 0, 0),
+            Font = new Font("Segoe UI", 11, FontStyle.Bold)
+        };
+        showAreasBtn.Click += (_, _) => ShowAreas();
+        panel.Controls.Add(showAreasBtn);
 
         areasStatus.Dock = DockStyle.Top;
         areasStatus.Height = 150;
@@ -141,6 +151,50 @@ internal sealed class MainForm : Form
         areasStatus.Text = string.Join(Environment.NewLine, lines);
     }
 
+    private void ShowAreas()
+    {
+        foreach (var key in new[] { "water_h1", "feed_h1", "water_h2", "feed_h2" })
+        {
+            var r = areas.Get(key);
+            if (!r.IsSet) continue;
+
+            using var bmp = CaptureArea(r);
+            int scale = 3;
+            var big = new Bitmap(bmp.Width * scale, bmp.Height * scale);
+            using (var g = Graphics.FromImage(big))
+            {
+                g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                g.PixelOffsetMode = PixelOffsetMode.Half;
+                g.DrawImage(bmp, 0, 0, big.Width, big.Height);
+            }
+
+            string name = key switch
+            {
+                "water_h1" => "вода Н-1",
+                "feed_h1"  => "корм Н-1",
+                "water_h2" => "вода Н-2",
+                "feed_h2"  => "корм Н-2",
+                _ => key
+            };
+
+            var f = new Form
+            {
+                Text = name + " — " + r,
+                Width = Math.Min(big.Width + 40, 1400),
+                Height = Math.Min(big.Height + 80, 400),
+                StartPosition = FormStartPosition.CenterScreen
+            };
+            var pb = new PictureBox
+            {
+                Image = big,
+                SizeMode = PictureBoxSizeMode.AutoSize,
+                Dock = DockStyle.Fill
+            };
+            f.Controls.Add(pb);
+            f.Show(this);
+        }
+    }
+
     private void RecognizeAll()
     {
         var sb = new StringBuilder();
@@ -167,8 +221,10 @@ internal sealed class MainForm : Form
             try
             {
                 using var bmp = CaptureArea(r);
-                string text = RunOcr(bmp);
-                sb.AppendLine($"{name}: {text}");
+                var numbers = RecognizeRow(bmp);
+
+                string marker = numbers.Count == 8 ? "" : $"  [найдено {numbers.Count} вместо 8]";
+                sb.AppendLine($"{name}: {string.Join(" ", numbers)}{marker}");
             }
             catch (Exception ex)
             {
@@ -188,115 +244,173 @@ internal sealed class MainForm : Form
         return bmp;
     }
 
-    private static string RunOcr(Bitmap source)
+    /// <summary>
+    /// Автоматически находит блоки цифр в строке и распознаёт каждый блок отдельно.
+    /// </summary>
+    private static List<string> RecognizeRow(Bitmap row)
     {
-        int scale = 3;
-        using var enlarged = new Bitmap(source.Width * scale, source.Height * scale);
+        // 1. Бинаризуем по "тёмности" — цифры тёмные, фон любой (белый, синий, жёлтый) светлее
+        bool[,] dark = BuildDarkMask(row, out int darkThreshold);
 
-        using (var g = Graphics.FromImage(enlarged))
+        // 2. Считаем количество тёмных пикселей в каждом вертикальном столбце
+        int[] columnDark = new int[row.Width];
+        for (int x = 0; x < row.Width; x++)
         {
-            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            g.DrawImage(source, 0, 0, enlarged.Width, enlarged.Height);
+            int count = 0;
+            for (int y = 0; y < row.Height; y++)
+            {
+                if (dark[x, y]) count++;
+            }
+            columnDark[x] = count;
         }
 
-        using var gray = ToGrayAndThreshold(enlarged);
+        // 3. Ищем непрерывные блоки, где есть тёмные пиксели
+        //    (столбцы с нулём — это пробелы между числами)
+        var blocks = new List<(int start, int end)>();
+        int i = 0;
+        while (i < columnDark.Length)
+        {
+            if (columnDark[i] > 0)
+            {
+                int s = i;
+                while (i < columnDark.Length && columnDark[i] > 0) i++;
+                int e = i - 1;
+                if (e - s >= 2)
+                    blocks.Add((s, e));
+            }
+            else i++;
+        }
 
+        // 4. Склеиваем слишком близкие блоки (если между ними 1-2 пикселя — это одна цифра или число)
+        const int mergeGap = 4;
+        var merged = new List<(int start, int end)>();
+        foreach (var b in blocks)
+        {
+            if (merged.Count == 0)
+            {
+                merged.Add(b);
+                continue;
+            }
+
+            var last = merged[^1];
+            if (b.start - last.end <= mergeGap)
+                merged[^1] = (last.start, b.end);
+            else
+                merged.Add(b);
+        }
+
+        // 5. Распознаём каждый блок
+        var results = new List<string>();
         string dataPath = Path.Combine(AppContext.BaseDirectory, "tessdata");
 
         using var engine = new TesseractEngine(dataPath, "eng", EngineMode.Default);
         engine.SetVariable("tessedit_char_whitelist", "0123456789,.");
         engine.SetVariable("classify_bln_numeric_mode", "1");
 
+        foreach (var (s, e) in merged)
+        {
+            int w = e - s + 1;
+            if (w < 4) continue;
+
+            using var cell = new Bitmap(w, row.Height);
+            using (var g = Graphics.FromImage(cell))
+            {
+                g.DrawImage(row,
+                    new Rectangle(0, 0, w, row.Height),
+                    new Rectangle(s, 0, w, row.Height),
+                    GraphicsUnit.Pixel);
+            }
+
+            string num = RecognizeCell(engine, cell);
+            results.Add(string.IsNullOrEmpty(num) ? "?" : num);
+        }
+
+        return results;
+    }
+
+    private static string RecognizeCell(TesseractEngine engine, Bitmap cell)
+    {
+        int scale = 4;
+
+        using var enlarged = new Bitmap(cell.Width * scale, cell.Height * scale);
+        using (var g = Graphics.FromImage(enlarged))
+        {
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            g.DrawImage(cell, 0, 0, enlarged.Width, enlarged.Height);
+        }
+
+        using var gray = ToGrayAndThreshold(enlarged);
+
         using var pix = PixConverter.ToPix(gray);
-        using var page = engine.Process(pix, PageSegMode.SingleLine);
+        using var page = engine.Process(pix, PageSegMode.SingleWord);
 
         string raw = page.GetText();
         raw = raw.Replace("\r", " ").Replace("\n", " ").Trim();
 
-        var sb = new StringBuilder();
-        bool skip = false;
-
+        var digits = new StringBuilder();
         foreach (char c in raw)
         {
-            if (c == ',' || c == '.')
-            {
-                skip = true;
-                continue;
-            }
-
-            if (skip)
-            {
-                if (c == ' ')
-                {
-                    skip = false;
-                    sb.Append(' ');
-                }
-                continue;
-            }
-
-            sb.Append(c);
+            if (char.IsDigit(c)) digits.Append(c);
         }
 
-        return sb.ToString().Trim();
+        return digits.ToString();
+    }
+
+    /// <summary>
+    /// Возвращает маску «тёмных» пикселей (цифры), независимо от цвета фона.
+    /// </summary>
+    private static bool[,] BuildDarkMask(Bitmap src, out int threshold)
+    {
+        int w = src.Width;
+        int h = src.Height;
+        var mask = new bool[w, h];
+
+        // Оцениваем среднюю яркость фона — берём верхнюю строку (там нет цифр),
+        // и нижнюю строку (тоже без цифр), считаем среднее.
+        long sum = 0;
+        int count = 0;
+        for (int x = 0; x < w; x++)
+        {
+            var c1 = src.GetPixel(x, 0);
+            sum += (int)(0.299 * c1.R + 0.587 * c1.G + 0.114 * c1.B);
+            count++;
+
+            var c2 = src.GetPixel(x, h - 1);
+            sum += (int)(0.299 * c2.R + 0.587 * c2.G + 0.114 * c2.B);
+            count++;
+        }
+
+        double bg = count > 0 ? (double)sum / count : 200;
+
+        // Порог: всё, что темнее половины яркости фона, считаем цифрой
+        threshold = (int)(bg * 0.5);
+
+        for (int y = 0; y < h; y++)
+        {
+            for (int x = 0; x < w; x++)
+            {
+                var c = src.GetPixel(x, y);
+                int lum = (int)(0.299 * c.R + 0.587 * c.G + 0.114 * c.B);
+                mask[x, y] = lum < threshold;
+            }
+        }
+
+        return mask;
     }
 
     private static Bitmap ToGrayAndThreshold(Bitmap src)
     {
         var result = new Bitmap(src.Width, src.Height);
 
-        int[] histogram = new int[256];
-        int total = src.Width * src.Height;
-
-        var grayValues = new byte[total];
-        int idx = 0;
-
         for (int y = 0; y < src.Height; y++)
         {
             for (int x = 0; x < src.Width; x++)
             {
                 var c = src.GetPixel(x, y);
-                byte v = (byte)(0.299 * c.R + 0.587 * c.G + 0.114 * c.B);
-                grayValues[idx++] = v;
-                histogram[v]++;
-            }
-        }
-
-        double sum = 0;
-        for (int i = 0; i < 256; i++) sum += i * histogram[i];
-
-        double sumB = 0;
-        int wB = 0;
-        int threshold = 0;
-        double maxVariance = 0;
-
-        for (int t = 0; t < 256; t++)
-        {
-            wB += histogram[t];
-            if (wB == 0) continue;
-
-            int wF = total - wB;
-            if (wF == 0) break;
-
-            sumB += t * histogram[t];
-            double mB = sumB / wB;
-            double mF = (sum - sumB) / wF;
-            double variance = (double)wB * wF * (mB - mF) * (mB - mF);
-
-            if (variance > maxVariance)
-            {
-                maxVariance = variance;
-                threshold = t;
-            }
-        }
-
-        idx = 0;
-        for (int y = 0; y < src.Height; y++)
-        {
-            for (int x = 0; x < src.Width; x++)
-            {
-                byte v = grayValues[idx++];
-                result.SetPixel(x, y, v > threshold ? Color.Black : Color.White);
+                int lum = (int)(0.299 * c.R + 0.587 * c.G + 0.114 * c.B);
+                // Тёмное — чёрное, светлое — белое (чтобы Tesseract видел чёрные цифры на белом)
+                result.SetPixel(x, y, lum < 128 ? Color.Black : Color.White);
             }
         }
 
