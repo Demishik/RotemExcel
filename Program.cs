@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Text;
 using System.Windows.Forms;
@@ -187,20 +188,32 @@ internal sealed class MainForm : Form
         return bmp;
     }
 
-    private static string RunOcr(Bitmap bmp)
+    private static string RunOcr(Bitmap source)
     {
+        int scale = 3;
+        using var enlarged = new Bitmap(source.Width * scale, source.Height * scale);
+
+        using (var g = Graphics.FromImage(enlarged))
+        {
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            g.DrawImage(source, 0, 0, enlarged.Width, enlarged.Height);
+        }
+
+        using var gray = ToGrayAndThreshold(enlarged);
+
         string dataPath = Path.Combine(AppContext.BaseDirectory, "tessdata");
 
         using var engine = new TesseractEngine(dataPath, "eng", EngineMode.Default);
         engine.SetVariable("tessedit_char_whitelist", "0123456789,.");
+        engine.SetVariable("classify_bln_numeric_mode", "1");
 
-        using var pix = PixConverter.ToPix(bmp);
+        using var pix = PixConverter.ToPix(gray);
         using var page = engine.Process(pix, PageSegMode.SingleLine);
 
         string raw = page.GetText();
         raw = raw.Replace("\r", " ").Replace("\n", " ").Trim();
 
-        // Убираем запятую и всё после неё: "2450,0" -> "2450"
         var sb = new StringBuilder();
         bool skip = false;
 
@@ -226,6 +239,68 @@ internal sealed class MainForm : Form
         }
 
         return sb.ToString().Trim();
+    }
+
+    private static Bitmap ToGrayAndThreshold(Bitmap src)
+    {
+        var result = new Bitmap(src.Width, src.Height);
+
+        int[] histogram = new int[256];
+        int total = src.Width * src.Height;
+
+        var grayValues = new byte[total];
+        int idx = 0;
+
+        for (int y = 0; y < src.Height; y++)
+        {
+            for (int x = 0; x < src.Width; x++)
+            {
+                var c = src.GetPixel(x, y);
+                byte v = (byte)(0.299 * c.R + 0.587 * c.G + 0.114 * c.B);
+                grayValues[idx++] = v;
+                histogram[v]++;
+            }
+        }
+
+        double sum = 0;
+        for (int i = 0; i < 256; i++) sum += i * histogram[i];
+
+        double sumB = 0;
+        int wB = 0;
+        int threshold = 0;
+        double maxVariance = 0;
+
+        for (int t = 0; t < 256; t++)
+        {
+            wB += histogram[t];
+            if (wB == 0) continue;
+
+            int wF = total - wB;
+            if (wF == 0) break;
+
+            sumB += t * histogram[t];
+            double mB = sumB / wB;
+            double mF = (sum - sumB) / wF;
+            double variance = (double)wB * wF * (mB - mF) * (mB - mF);
+
+            if (variance > maxVariance)
+            {
+                maxVariance = variance;
+                threshold = t;
+            }
+        }
+
+        idx = 0;
+        for (int y = 0; y < src.Height; y++)
+        {
+            for (int x = 0; x < src.Width; x++)
+            {
+                byte v = grayValues[idx++];
+                result.SetPixel(x, y, v > threshold ? Color.Black : Color.White);
+            }
+        }
+
+        return result;
     }
 }
 
