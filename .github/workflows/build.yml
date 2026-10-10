@@ -1,52 +1,47 @@
-
-name: Build RotemExcel
+name: Build Windows EXE
 
 on:
-  workflow_dispatch:
   push:
-    branches:
-      - main
-
-permissions:
-  contents: read
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
 
-      - name: Restore packages
-        run: dotnet restore RotemExcel.csproj
+      - name: Restore
+        run: dotnet restore
 
-      - name: Publish application
-        run: >-
-          dotnet publish RotemExcel.csproj
-          -c Release
-          -r win-x64
-          --self-contained true
-          -p:PublishSingleFile=false
-          -o publish
+      - name: Publish
+        run: dotnet publish -c Release -r win-x64 --self-contained true -o publish
 
-      - name: Download OCR language data
+      - name: Clean tessdata (keep only eng)
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force publish/tessdata
-          Invoke-WebRequest `
-            -Uri "https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata" `
-            -OutFile "publish/tessdata/eng.traineddata"
+          $tess = "publish\tessdata"
+          if (Test-Path $tess) {
+            Get-ChildItem $tess -Recurse | Where-Object { $_.Name -ne "eng.traineddata" } | Remove-Item -Recurse -Force
+          }
 
-      - name: Upload application folder
+      - name: Remove extra language folders in publish
+        shell: pwsh
+        run: |
+          $langs = @("cs","de","es","fr","it","ja","ko","pl","pt-BR","ru","tr","zh-Hans","zh-Hant")
+          foreach ($l in $langs) {
+            $p = "publish\$l"
+            if (Test-Path $p) { Remove-Item $p -Recurse -Force }
+          }
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: RotemExcel-Windows-x64
-          path: publish/
-          if-no-files-found: error
-          retention-days: 14
+          path: publish
