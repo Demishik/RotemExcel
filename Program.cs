@@ -36,7 +36,7 @@ internal sealed class MainForm : Form
         var panel = new FlowLayoutPanel
         {
             Dock = DockStyle.Top,
-            Height = 320,
+            Height = 380,
             Padding = new Padding(10),
             FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
@@ -57,6 +57,16 @@ internal sealed class MainForm : Form
         };
         recognizeBtn.Click += (_, _) => RecognizeAll();
         panel.Controls.Add(recognizeBtn);
+
+        var diagBtn = new Button
+        {
+            Text = "Диагностика",
+            AutoSize = true,
+            Margin = new Padding(0, 8, 0, 0),
+            Font = new Font("Segoe UI", 11, FontStyle.Bold)
+        };
+        diagBtn.Click += (_, _) => RunDiagnostics();
+        panel.Controls.Add(diagBtn);
 
         areasStatus.Dock = DockStyle.Top;
         areasStatus.Height = 150;
@@ -185,33 +195,67 @@ internal sealed class MainForm : Form
         ocrResult.Text = sb.ToString();
     }
 
+    private void RunDiagnostics()
+    {
+        var results = new List<(string name, Bitmap bmp, List<int> blockEdges, string numbers)>();
+
+        foreach (var key in new[] { "water_h1", "feed_h1", "water_h2", "feed_h2" })
+        {
+            string name = key switch
+            {
+                "water_h1" => "вода Н-1",
+                "feed_h1"  => "корм Н-1",
+                "water_h2" => "вода Н-2",
+                "feed_h2"  => "корм Н-2",
+                _ => key
+            };
+
+            var r = areas.Get(key);
+            if (!r.IsSet)
+            {
+                results.Add((name, new Bitmap(100, 30), new List<int>(), "(не задана)"));
+                continue;
+            }
+
+            var bmp = CaptureArea(r);
+            var (numbers, edges) = RecognizeRowWithEdges(bmp);
+            results.Add((name, bmp, edges, string.Join(" ", numbers)));
+        }
+
+        // Сохраняем на диск — на случай, если нужно будет прислать
+        string baseDir = AppContext.BaseDirectory;
+        foreach (var (name, bmp, _, _) in results)
+        {
+            string fileName = name.Replace(" ", "_").Replace("-", "_") + ".png";
+            string path = Path.Combine(baseDir, "debug_" + fileName);
+            try { bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png); } catch { }
+        }
+
+        using var diag = new DiagnosticsForm(results);
+        diag.ShowDialog(this);
+
+        ocrResult.Text =
+            "ДИАГНОСТИКА завершена.\r\n" +
+            $"Картинки сохранены в: {baseDir}\r\n\r\n" +
+            string.Join("\r\n", results.Select(r => $"{r.name}: {r.numbers}"));
+    }
+
     private static Bitmap CaptureArea(AreaRect r)
     {
-        // Расширяем область на 10 пикселей во все стороны,
-        // чтобы первая/последняя цифра не обрезалась, даже если
-        // рамка выделена впритык.
-        const int pad = 10;
-
-        int x = r.X - pad;
-        int y = r.Y - pad;
-        int w = r.Width + pad * 2;
-        int h = r.Height + pad * 2;
-
-        // Не выходим за виртуальный рабочий стол
-        var vs = SystemInformation.VirtualScreen;
-        if (x < vs.Left) { w -= vs.Left - x; x = vs.Left; }
-        if (y < vs.Top)  { h -= vs.Top - y;  y = vs.Top; }
-        if (x + w > vs.Right)  w = vs.Right - x;
-        if (y + h > vs.Bottom) h = vs.Bottom - y;
-
-        var bmp = new Bitmap(w, h);
+        var bmp = new Bitmap(r.Width, r.Height);
         using var g = Graphics.FromImage(bmp);
-        g.CopyFromScreen(x, y, 0, 0, new Size(w, h),
+        g.CopyFromScreen(r.X, r.Y, 0, 0, new Size(r.Width, r.Height),
             CopyPixelOperation.SourceCopy);
         return bmp;
     }
 
     private static List<string> RecognizeRow(Bitmap row)
+    {
+        var (numbers, _) = RecognizeRowWithEdges(row);
+        return numbers;
+    }
+
+    private static (List<string> numbers, List<int> edges) RecognizeRowWithEdges(Bitmap row)
     {
         int w = row.Width;
         int h = row.Height;
@@ -266,6 +310,14 @@ internal sealed class MainForm : Form
         var merged = MergeCloseBlocks(blocks, mergeGap);
         merged = ForceEightBlocks(merged, w);
 
+        // Собираем границы блоков для отображения
+        var edges = new List<int>();
+        foreach (var b in merged)
+        {
+            edges.Add(b.start);
+            edges.Add(b.end);
+        }
+
         var results = new List<string>();
         string dataPath = Path.Combine(AppContext.BaseDirectory, "tessdata");
 
@@ -291,7 +343,7 @@ internal sealed class MainForm : Form
             results.Add(string.IsNullOrEmpty(num) ? "?" : num);
         }
 
-        return results;
+        return (results, edges);
     }
 
     private static List<(int start, int end)> MergeCloseBlocks(
@@ -577,5 +629,81 @@ internal sealed class SelectionForm : Form
 
         using var pen = new Pen(Color.Lime, 3);
         e.Graphics.DrawRectangle(pen, left, top, width, height);
+    }
+}
+
+internal sealed class DiagnosticsForm : Form
+{
+    public DiagnosticsForm(List<(string name, Bitmap bmp, List<int> blockEdges, string numbers)> data)
+    {
+        Text = "Диагностика — границы блоков и распознанные числа";
+        StartPosition = FormStartPosition.CenterScreen;
+        Width = 1400;
+        Height = 900;
+        KeyPreview = true;
+
+        var panel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 2,
+            Padding = new Padding(10)
+        };
+
+        for (int i = 0; i < 4; i++)
+        {
+            panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            panel.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        }
+
+        foreach (var item in data)
+        {
+            var gb = new GroupBox
+            {
+                Text = $"{item.name}  →  {item.numbers}",
+                Dock = DockStyle.Fill,
+                Font = new Font("Consolas", 11, FontStyle.Bold)
+            };
+
+            var pb = new PictureBox
+            {
+                Dock = DockStyle.Fill,
+                SizeMode = PictureBoxSizeMode.Zoom,
+                Image = DrawEdges(item.bmp, item.blockEdges)
+            };
+
+            gb.Controls.Add(pb);
+            panel.Controls.Add(gb);
+        }
+
+        Controls.Add(panel);
+
+        KeyDown += (_, e) =>
+        {
+            if (e.KeyCode == Keys.Escape) Close();
+        };
+    }
+
+    private static Bitmap DrawEdges(Bitmap src, List<int> edges)
+    {
+        int scale = 3;
+        var big = new Bitmap(src.Width * scale, src.Height * scale);
+
+        using (var g = Graphics.FromImage(big))
+        {
+            g.InterpolationMode = InterpolationMode.NearestNeighbor;
+            g.PixelOffsetMode = PixelOffsetMode.Half;
+            g.DrawImage(src, 0, 0, big.Width, big.Height);
+
+            using var pen = new Pen(Color.Red, 2);
+            foreach (int x in edges)
+            {
+                int bx = x * scale;
+                if (bx >= 0 && bx < big.Width)
+                    g.DrawLine(pen, bx, 0, bx, big.Height);
+            }
+        }
+
+        return big;
     }
 }
