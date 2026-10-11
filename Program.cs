@@ -248,7 +248,7 @@ internal sealed class MainForm : Form
     private static (List<string> numbers, List<int> edges) RecognizeRowWithEdges(Bitmap row)
     {
         const int cells = 8;
-        const int pad = 4;
+        const int pad = 12; // ← расширяем ячейку сильно, чтобы число гарантированно попало в центр
 
         int w = row.Width;
         int h = row.Height;
@@ -319,7 +319,9 @@ internal sealed class MainForm : Form
         using var bw = ToBlackOnWhite(enlarged);
 
         using var pix = PixConverter.ToPix(bw);
-        using var page = engine.Process(pix, PageSegMode.SingleWord);
+        // SingleLine вместо SingleWord — Tesseract ищет строку цифр,
+        // а не одно слово. Меньше рискует обрезать первую/последнюю цифру.
+        using var page = engine.Process(pix, PageSegMode.SingleLine);
 
         string raw = page.GetText();
         raw = raw.Replace("\r", " ").Replace("\n", " ").Trim();
