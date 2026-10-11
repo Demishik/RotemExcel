@@ -187,9 +187,26 @@ internal sealed class MainForm : Form
 
     private static Bitmap CaptureArea(AreaRect r)
     {
-        var bmp = new Bitmap(r.Width, r.Height);
+        // Расширяем область на 10 пикселей во все стороны,
+        // чтобы первая/последняя цифра не обрезалась, даже если
+        // рамка выделена впритык.
+        const int pad = 10;
+
+        int x = r.X - pad;
+        int y = r.Y - pad;
+        int w = r.Width + pad * 2;
+        int h = r.Height + pad * 2;
+
+        // Не выходим за виртуальный рабочий стол
+        var vs = SystemInformation.VirtualScreen;
+        if (x < vs.Left) { w -= vs.Left - x; x = vs.Left; }
+        if (y < vs.Top)  { h -= vs.Top - y;  y = vs.Top; }
+        if (x + w > vs.Right)  w = vs.Right - x;
+        if (y + h > vs.Bottom) h = vs.Bottom - y;
+
+        var bmp = new Bitmap(w, h);
         using var g = Graphics.FromImage(bmp);
-        g.CopyFromScreen(r.X, r.Y, 0, 0, new Size(r.Width, r.Height),
+        g.CopyFromScreen(x, y, 0, 0, new Size(w, h),
             CopyPixelOperation.SourceCopy);
         return bmp;
     }
@@ -245,9 +262,6 @@ internal sealed class MainForm : Form
             else i++;
         }
 
-        // Зазор между числами больше, чем между цифрами внутри числа.
-        // Ставим фиксированно 2 пикселя — этого достаточно, чтобы
-        // не склеивать соседние числа.
         int mergeGap = 2;
         var merged = MergeCloseBlocks(blocks, mergeGap);
         merged = ForceEightBlocks(merged, w);
@@ -372,7 +386,6 @@ internal sealed class MainForm : Form
         string raw = page.GetText();
         raw = raw.Replace("\r", " ").Replace("\n", " ").Trim();
 
-        // Оставляем только цифры, всё после запятой/точки — отбрасываем.
         var digits = new StringBuilder();
 
         foreach (char c in raw)
