@@ -245,19 +245,15 @@ internal sealed class MainForm : Form
         return numbers;
     }
 
-    /// <summary>
-    /// Делит строку на 8 равных частей (столбцы в Rotem одинаковой ширины)
-    /// и распознаёт каждое число отдельно.
-    /// </summary>
     private static (List<string> numbers, List<int> edges) RecognizeRowWithEdges(Bitmap row)
     {
         const int cells = 8;
+        const int pad = 4;
 
         int w = row.Width;
         int h = row.Height;
 
-        // Оставляем по 3 пикселя слева и справа, чтобы убрать рамку области
-        int margin = 3;
+        int margin = 0;
         int usableWidth = w - margin * 2;
 
         var results = new List<string>();
@@ -277,7 +273,11 @@ internal sealed class MainForm : Form
             int cellX = margin + (int)Math.Round((double)usableWidth * i / cells);
             int cellW = (int)Math.Round((double)usableWidth / cells);
 
-            if (cellW < 4)
+            int cropX = Math.Max(0, cellX - pad);
+            int cropRight = Math.Min(w, cellX + cellW + pad);
+            int cropW = cropRight - cropX;
+
+            if (cropW < 4)
             {
                 results.Add("?");
                 edges.Add(cellX);
@@ -288,12 +288,12 @@ internal sealed class MainForm : Form
             edges.Add(cellX);
             edges.Add(cellX + cellW);
 
-            using var cell = new Bitmap(cellW, h);
+            using var cell = new Bitmap(cropW, h);
             using (var g = Graphics.FromImage(cell))
             {
                 g.DrawImage(row,
-                    new Rectangle(0, 0, cellW, h),
-                    new Rectangle(cellX, 0, cellW, h),
+                    new Rectangle(0, 0, cropW, h),
+                    new Rectangle(cropX, 0, cropW, h),
                     GraphicsUnit.Pixel);
             }
 
