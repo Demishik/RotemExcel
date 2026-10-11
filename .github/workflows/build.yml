@@ -38,8 +38,8 @@ jobs:
           if (Test-Path $tess) { Remove-Item $tess -Recurse -Force }
           New-Item -ItemType Directory -Path $tess | Out-Null
 
-          # Скачиваем eng.traineddata
-          $url = "https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata"
+          # Скачиваем eng.traineddata из tessdata_best (точнее, чем fast)
+          $url = "https://github.com/tesseract-ocr/tessdata_best/raw/main/eng.traineddata"
           Write-Host "Downloading $url ..."
           Invoke-WebRequest -Uri $url -OutFile "$tess\eng.traineddata"
 
