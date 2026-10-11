@@ -197,7 +197,7 @@ internal sealed class MainForm : Form
 
     private void RunDiagnostics()
     {
-        var results = new List<(string name, Bitmap bmp, List<int> blockEdges, string numbers)>();
+        var results = new List<(string name, Bitmap bmp, List<int> edges, string numbers)>();
 
         foreach (var key in new[] { "water_h1", "feed_h1", "water_h2", "feed_h2" })
         {
@@ -222,21 +222,11 @@ internal sealed class MainForm : Form
             results.Add((name, bmp, edges, string.Join(" ", numbers)));
         }
 
-        // Сохраняем на диск — на случай, если нужно будет прислать
-        string baseDir = AppContext.BaseDirectory;
-        foreach (var (name, bmp, _, _) in results)
-        {
-            string fileName = name.Replace(" ", "_").Replace("-", "_") + ".png";
-            string path = Path.Combine(baseDir, "debug_" + fileName);
-            try { bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png); } catch { }
-        }
-
         using var diag = new DiagnosticsForm(results);
         diag.ShowDialog(this);
 
         ocrResult.Text =
-            "ДИАГНОСТИКА завершена.\r\n" +
-            $"Картинки сохранены в: {baseDir}\r\n\r\n" +
+            "ДИАГНОСТИКА завершена.\r\n\r\n" +
             string.Join("\r\n", results.Select(r => $"{r.name}: {r.numbers}"));
     }
 
@@ -255,87 +245,55 @@ internal sealed class MainForm : Form
         return numbers;
     }
 
+    /// <summary>
+    /// Делит строку на 8 равных частей (столбцы в Rotem одинаковой ширины)
+    /// и распознаёт каждое число отдельно.
+    /// </summary>
     private static (List<string> numbers, List<int> edges) RecognizeRowWithEdges(Bitmap row)
     {
+        const int cells = 8;
+
         int w = row.Width;
         int h = row.Height;
 
-        bool[,] dark = OtsuBinarize(row);
-
-        int[] columnDark = new int[w];
-        for (int x = 0; x < w; x++)
-        {
-            int c = 0;
-            for (int y = 0; y < h; y++)
-                if (dark[x, y]) c++;
-            columnDark[x] = c;
-        }
-
-        int[] smooth = new int[w];
-        for (int x = 0; x < w; x++)
-        {
-            int sum = 0, cnt = 0;
-            for (int d = -1; d <= 1; d++)
-            {
-                int xx = x + d;
-                if (xx < 0 || xx >= w) continue;
-                sum += columnDark[xx];
-                cnt++;
-            }
-            smooth[x] = cnt == 0 ? 0 : sum / cnt;
-        }
-
-        int noise = Math.Max(1, h / 8);
-        bool[] isText = new bool[w];
-        for (int x = 0; x < w; x++)
-            isText[x] = smooth[x] >= noise;
-
-        var blocks = new List<(int start, int end)>();
-        int i = 0;
-        while (i < w)
-        {
-            if (isText[i])
-            {
-                int s = i;
-                while (i < w && isText[i]) i++;
-                int e = i - 1;
-
-                if (e - s + 1 >= 4)
-                    blocks.Add((start: s, end: e));
-            }
-            else i++;
-        }
-
-        int mergeGap = 2;
-        var merged = MergeCloseBlocks(blocks, mergeGap);
-        merged = ForceEightBlocks(merged, w);
-
-        // Собираем границы блоков для отображения
-        var edges = new List<int>();
-        foreach (var b in merged)
-        {
-            edges.Add(b.start);
-            edges.Add(b.end);
-        }
+        // Оставляем по 3 пикселя слева и справа, чтобы убрать рамку области
+        int margin = 3;
+        int usableWidth = w - margin * 2;
 
         var results = new List<string>();
+        var edges = new List<int>();
+
+        if (usableWidth <= 0)
+            return (results, edges);
+
         string dataPath = Path.Combine(AppContext.BaseDirectory, "tessdata");
 
         using var engine = new TesseractEngine(dataPath, "eng", EngineMode.Default);
         engine.SetVariable("tessedit_char_whitelist", "0123456789,.");
         engine.SetVariable("classify_bln_numeric_mode", "1");
 
-        foreach (var (s, e) in merged)
+        for (int i = 0; i < cells; i++)
         {
-            int bw = e - s + 1;
-            if (bw < 3) { results.Add("?"); continue; }
+            int cellX = margin + (int)Math.Round((double)usableWidth * i / cells);
+            int cellW = (int)Math.Round((double)usableWidth / cells);
 
-            using var cell = new Bitmap(bw, h);
+            if (cellW < 4)
+            {
+                results.Add("?");
+                edges.Add(cellX);
+                edges.Add(cellX + cellW);
+                continue;
+            }
+
+            edges.Add(cellX);
+            edges.Add(cellX + cellW);
+
+            using var cell = new Bitmap(cellW, h);
             using (var g = Graphics.FromImage(cell))
             {
                 g.DrawImage(row,
-                    new Rectangle(0, 0, bw, h),
-                    new Rectangle(s, 0, bw, h),
+                    new Rectangle(0, 0, cellW, h),
+                    new Rectangle(cellX, 0, cellW, h),
                     GraphicsUnit.Pixel);
             }
 
@@ -344,78 +302,6 @@ internal sealed class MainForm : Form
         }
 
         return (results, edges);
-    }
-
-    private static List<(int start, int end)> MergeCloseBlocks(
-        List<(int start, int end)> blocks, int gap)
-    {
-        var merged = new List<(int start, int end)>();
-
-        foreach (var b in blocks)
-        {
-            if (merged.Count == 0) { merged.Add(b); continue; }
-
-            var last = merged[^1];
-            if (b.start - last.end <= gap)
-                merged[^1] = (start: last.start, end: b.end);
-            else
-                merged.Add(b);
-        }
-
-        return merged;
-    }
-
-    private static List<(int start, int end)> ForceEightBlocks(
-        List<(int start, int end)> blocks, int width)
-    {
-        const int target = 8;
-
-        while (blocks.Count > target)
-        {
-            int bestIdx = -1;
-            int bestGap = int.MaxValue;
-
-            for (int i = 0; i < blocks.Count - 1; i++)
-            {
-                int gap = blocks[i + 1].start - blocks[i].end;
-                if (gap < bestGap)
-                {
-                    bestGap = gap;
-                    bestIdx = i;
-                }
-            }
-
-            if (bestIdx < 0) break;
-
-            blocks[bestIdx] = (start: blocks[bestIdx].start, end: blocks[bestIdx + 1].end);
-            blocks.RemoveAt(bestIdx + 1);
-        }
-
-        while (blocks.Count < target)
-        {
-            int bestIdx = -1;
-            int bestWidth = 0;
-
-            for (int i = 0; i < blocks.Count; i++)
-            {
-                int w = blocks[i].end - blocks[i].start + 1;
-                if (w > bestWidth)
-                {
-                    bestWidth = w;
-                    bestIdx = i;
-                }
-            }
-
-            if (bestIdx < 0 || bestWidth < 10) break;
-
-            var b = blocks[bestIdx];
-            int mid = (b.start + b.end) / 2;
-
-            blocks[bestIdx] = (start: b.start, end: mid);
-            blocks.Insert(bestIdx + 1, (start: mid + 1, end: b.end));
-        }
-
-        return blocks;
     }
 
     private static string RecognizeCell(TesseractEngine engine, Bitmap cell)
@@ -450,84 +336,6 @@ internal sealed class MainForm : Form
         }
 
         return digits.ToString();
-    }
-
-    private static bool[,] OtsuBinarize(Bitmap src)
-    {
-        int w = src.Width;
-        int h = src.Height;
-
-        var gray = new byte[w * h];
-        int[] histogram = new int[256];
-
-        int idx = 0;
-        for (int y = 0; y < h; y++)
-        {
-            for (int x = 0; x < w; x++)
-            {
-                var c = src.GetPixel(x, y);
-                byte v = (byte)(0.299 * c.R + 0.587 * c.G + 0.114 * c.B);
-                gray[idx++] = v;
-                histogram[v]++;
-            }
-        }
-
-        int total = w * h;
-        double sum = 0;
-        for (int i = 0; i < 256; i++) sum += i * histogram[i];
-
-        double sumB = 0;
-        int wB = 0;
-        int threshold = 0;
-        double maxVariance = 0;
-
-        for (int t = 0; t < 256; t++)
-        {
-            wB += histogram[t];
-            if (wB == 0) continue;
-
-            int wF = total - wB;
-            if (wF == 0) break;
-
-            sumB += t * histogram[t];
-            double mB = sumB / wB;
-            double mF = (sum - sumB) / wF;
-            double variance = (double)wB * wF * (mB - mF) * (mB - mF);
-
-            if (variance > maxVariance)
-            {
-                maxVariance = variance;
-                threshold = t;
-            }
-        }
-
-        double bgSum = 0; int bgCnt = 0;
-        for (int x = 0; x < w; x++)
-        {
-            var top = src.GetPixel(x, 0);
-            bgSum += 0.299 * top.R + 0.587 * top.G + 0.114 * top.B;
-            bgCnt++;
-
-            var bot = src.GetPixel(x, h - 1);
-            bgSum += 0.299 * bot.R + 0.587 * bot.G + 0.114 * bot.B;
-            bgCnt++;
-        }
-        double bg = bgCnt > 0 ? bgSum / bgCnt : 200;
-
-        bool darkText = bg > threshold;
-
-        var mask = new bool[w, h];
-        idx = 0;
-        for (int y = 0; y < h; y++)
-        {
-            for (int x = 0; x < w; x++)
-            {
-                byte v = gray[idx++];
-                mask[x, y] = darkText ? v < threshold : v > threshold;
-            }
-        }
-
-        return mask;
     }
 
     private static Bitmap ToBlackOnWhite(Bitmap src)
@@ -634,9 +442,9 @@ internal sealed class SelectionForm : Form
 
 internal sealed class DiagnosticsForm : Form
 {
-    public DiagnosticsForm(List<(string name, Bitmap bmp, List<int> blockEdges, string numbers)> data)
+    public DiagnosticsForm(List<(string name, Bitmap bmp, List<int> edges, string numbers)> data)
     {
-        Text = "Диагностика — границы блоков и распознанные числа";
+        Text = "Диагностика — границы блоков";
         StartPosition = FormStartPosition.CenterScreen;
         Width = 1400;
         Height = 900;
@@ -669,7 +477,7 @@ internal sealed class DiagnosticsForm : Form
             {
                 Dock = DockStyle.Fill,
                 SizeMode = PictureBoxSizeMode.Zoom,
-                Image = DrawEdges(item.bmp, item.blockEdges)
+                Image = DrawEdges(item.bmp, item.edges)
             };
 
             gb.Controls.Add(pb);
