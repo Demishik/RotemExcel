@@ -245,7 +245,10 @@ internal sealed class MainForm : Form
             else i++;
         }
 
-        int mergeGap = Math.Max(2, h / 6);
+        // Зазор между числами больше, чем между цифрами внутри числа.
+        // Ставим фиксированно 2 пикселя — этого достаточно, чтобы
+        // не склеивать соседние числа.
+        int mergeGap = 2;
         var merged = MergeCloseBlocks(blocks, mergeGap);
         merged = ForceEightBlocks(merged, w);
 
@@ -369,10 +372,16 @@ internal sealed class MainForm : Form
         string raw = page.GetText();
         raw = raw.Replace("\r", " ").Replace("\n", " ").Trim();
 
+        // Оставляем только цифры, всё после запятой/точки — отбрасываем.
         var digits = new StringBuilder();
+
         foreach (char c in raw)
         {
-            if (char.IsDigit(c)) digits.Append(c);
+            if (c == ',' || c == '.')
+                break;
+
+            if (char.IsDigit(c))
+                digits.Append(c);
         }
 
         return digits.ToString();
