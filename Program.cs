@@ -194,19 +194,13 @@ internal sealed class MainForm : Form
         return bmp;
     }
 
-    // =================================================================
-    // Основная логика: находим 8 чисел в строке
-    // =================================================================
-
     private static List<string> RecognizeRow(Bitmap row)
     {
         int w = row.Width;
         int h = row.Height;
 
-        // 1. Otsu-бинаризация всей области → массив bool (true = цифра)
         bool[,] dark = OtsuBinarize(row);
 
-        // 2. Профиль по горизонтали: сколько тёмных пикселей в каждом столбце
         int[] columnDark = new int[w];
         for (int x = 0; x < w; x++)
         {
@@ -216,7 +210,6 @@ internal sealed class MainForm : Form
             columnDark[x] = c;
         }
 
-        // 3. Сглаживание окном 3
         int[] smooth = new int[w];
         for (int x = 0; x < w; x++)
         {
@@ -231,13 +224,11 @@ internal sealed class MainForm : Form
             smooth[x] = cnt == 0 ? 0 : sum / cnt;
         }
 
-        // 4. Порог "есть текст" — небольшое число, чтобы шум не резал блоки
         int noise = Math.Max(1, h / 8);
         bool[] isText = new bool[w];
         for (int x = 0; x < w; x++)
             isText[x] = smooth[x] >= noise;
 
-        // 5. Ищем блоки (непрерывные участки isText == true)
         var blocks = new List<(int start, int end)>();
         int i = 0;
         while (i < w)
@@ -248,22 +239,16 @@ internal sealed class MainForm : Form
                 while (i < w && isText[i]) i++;
                 int e = i - 1;
 
-                // Минимальная ширина блока — 4 пикселя
                 if (e - s + 1 >= 4)
-                    blocks.Add((s, e));
+                    blocks.Add((start: s, end: e));
             }
             else i++;
         }
 
-        // 6. Склеиваем блоки, между которыми зазор ≤ mergeGap
-        //    (внутри одного числа между цифрами зазор маленький)
         int mergeGap = Math.Max(2, h / 6);
         var merged = MergeCloseBlocks(blocks, mergeGap);
-
-        // 7. Принудительно сводим к 8 числам
         merged = ForceEightBlocks(merged, w);
 
-        // 8. Распознаём каждый блок
         var results = new List<string>();
         string dataPath = Path.Combine(AppContext.BaseDirectory, "tessdata");
 
@@ -295,7 +280,7 @@ internal sealed class MainForm : Form
     private static List<(int start, int end)> MergeCloseBlocks(
         List<(int start, int end)> blocks, int gap)
     {
-        var merged = new List<(int, int)>();
+        var merged = new List<(int start, int end)>();
 
         foreach (var b in blocks)
         {
@@ -303,7 +288,7 @@ internal sealed class MainForm : Form
 
             var last = merged[^1];
             if (b.start - last.end <= gap)
-                merged[^1] = (last.start, b.end);
+                merged[^1] = (start: last.start, end: b.end);
             else
                 merged.Add(b);
         }
@@ -311,16 +296,11 @@ internal sealed class MainForm : Form
         return merged;
     }
 
-    /// <summary>
-    /// Принудительно сводит список блоков к ровно 8 числам.
-    /// </summary>
     private static List<(int start, int end)> ForceEightBlocks(
         List<(int start, int end)> blocks, int width)
     {
         const int target = 8;
 
-        // Если блоков больше 8 — склеиваем самые близкие пары,
-        // пока не останется ровно 8.
         while (blocks.Count > target)
         {
             int bestIdx = -1;
@@ -338,12 +318,10 @@ internal sealed class MainForm : Form
 
             if (bestIdx < 0) break;
 
-            var mergedBlock = (blocks[bestIdx].start, blocks[bestIdx + 1].end);
-            blocks[bestIdx] = mergedBlock;
+            blocks[bestIdx] = (start: blocks[bestIdx].start, end: blocks[bestIdx + 1].end);
             blocks.RemoveAt(bestIdx + 1);
         }
 
-        // Если блоков меньше 8 — делим самые широкие, где внутри есть провал.
         while (blocks.Count < target)
         {
             int bestIdx = -1;
@@ -364,18 +342,12 @@ internal sealed class MainForm : Form
             var b = blocks[bestIdx];
             int mid = (b.start + b.end) / 2;
 
-            // Ищем "провал" — столбец с минимумом тёмных пикселей около центра
-            // (упрощённо — просто делим пополам)
-            blocks[bestIdx] = (b.start, mid);
-            blocks.Insert(bestIdx + 1, (mid + 1, b.end));
+            blocks[bestIdx] = (start: b.start, end: mid);
+            blocks.Insert(bestIdx + 1, (start: mid + 1, end: b.end));
         }
 
         return blocks;
     }
-
-    // =================================================================
-    // OCR одного числа
-    // =================================================================
 
     private static string RecognizeCell(TesseractEngine engine, Bitmap cell)
     {
@@ -406,14 +378,6 @@ internal sealed class MainForm : Form
         return digits.ToString();
     }
 
-    // =================================================================
-    // Бинаризация
-    // =================================================================
-
-    /// <summary>
-    /// Otsu-бинаризация. Возвращает массив bool: true = "тёмный" пиксель.
-    /// Автоматически определяет, что считать текстом, независимо от цвета фона.
-    /// </summary>
     private static bool[,] OtsuBinarize(Bitmap src)
     {
         int w = src.Width;
@@ -463,8 +427,6 @@ internal sealed class MainForm : Form
             }
         }
 
-        // Определяем, что темнее — текст или фон. Считаем среднюю яркость
-        // верхней и нижней строк (там обычно нет цифр).
         double bgSum = 0; int bgCnt = 0;
         for (int x = 0; x < w; x++)
         {
@@ -478,10 +440,6 @@ internal sealed class MainForm : Form
         }
         double bg = bgCnt > 0 ? bgSum / bgCnt : 200;
 
-        // Если фон светлый (яркость > threshold) — текст тёмный:
-        //   пиксель считается текстом, если его яркость < threshold.
-        // Если фон тёмный — текст светлый:
-        //   пиксель считается текстом, если его яркость > threshold.
         bool darkText = bg > threshold;
 
         var mask = new bool[w, h];
